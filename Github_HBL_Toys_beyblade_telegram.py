@@ -14,19 +14,20 @@ import requests
 from bs4 import BeautifulSoup
 
 # ============ 共用設定 ============
-# 預設 Telegram 設定（GitHub Actions 會用 Secrets 覆蓋，更安全）
-TG_BOT_TOKEN = os.environ.get(
-    "TG_BOT_TOKEN", "7971964410:AAFlyZHnvihiGFWRtW7AYbBuJyRYIvjG8QI"
-)
+TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
+if not TG_BOT_TOKEN:
+    raise SystemExit("❌ 未設定 TG_BOT_TOKEN（請喺 GitHub Secrets 或本機環境變數加入）")
 
-DEFAULT_CHAT_IDS = {"425203130": "我自己", "627158297": "Lok", "7146407783": "Ray Fung"}
-TG_CHAT_IDS = DEFAULT_CHAT_IDS
+# Chat IDs 一律由環境變數讀，唔再 hardcode
+TG_CHAT_IDS = {}
 env_chat_ids = os.environ.get("TG_CHAT_IDS")
 if env_chat_ids:
     try:
         TG_CHAT_IDS = json.loads(env_chat_ids)
     except Exception:
-        TG_CHAT_IDS = DEFAULT_CHAT_IDS
+        log.error("TG_CHAT_IDS 格式錯誤，應為合法 JSON")
+if not TG_CHAT_IDS:
+    raise SystemExit("❌ 未設定 TG_CHAT_IDS")
 
 # 🧪 測試開關：True = 即刻列晒兩邊現貨一次就停（本機用）
 TEST_MODE = False
