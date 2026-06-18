@@ -75,7 +75,7 @@ HEADERS = {
 TRU_HEADERS = {
     "User-Agent": HEADERS["User-Agent"],
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-HK,en;q=0.9,zh-HK;q=0.8,zh;q=0.7",
+    "Accept-Language": "zh-HK,zh;q=0.9,en-HK;q=0.8,en;q=0.7",
     "Referer": TRU_BASE + "/zh-hk/",
 }
 
