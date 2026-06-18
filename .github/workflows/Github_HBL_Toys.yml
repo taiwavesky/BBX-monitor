@@ -1,4 +1,4 @@
-name: Beyblade Stock Monitor
+name: Github_HBL_Toys_beyblade_telegram_Monitor
 
 on:
   # ✅ 由 cron-jobs.org 經 GitHub API 觸發（必須要有 workflow_dispatch）
