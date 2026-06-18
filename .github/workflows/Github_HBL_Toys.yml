@@ -1,0 +1,49 @@
+name: Beyblade Stock Monitor
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:        # 允許網頁／API 手動觸發
+
+concurrency:
+  group: stock-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run-monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 lxml      # ← 新增 bs4 / lxml
+
+      - name: Run monitor script
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_IDS: ${{ secrets.TG_CHAT_IDS }}
+        run: python Github_HBL_Toys_beyblade_telegram.py
+
+      # 🔴 把兩個 state 都 commit 返 repo
+      - name: Persist state
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seen_products.json seen_toysrus.json 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "state 冇變化,唔使 commit"
+          else
+            git commit -m "chore: update state [skip ci]"
+            git push
+          fi
