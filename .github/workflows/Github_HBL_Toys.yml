@@ -49,7 +49,7 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add seen_products.json seen_toysrus.json 2>/dev/null || true
+          git add seen_hobbyland.json seen_toysrus.json 2>/dev/null || true
           if git diff --staged --quiet; then
             echo "state 冇變化,唔使 commit"
           else
