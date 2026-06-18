@@ -50,7 +50,7 @@ TRU_BASE = "https://www.toysrus.com.hk"
 TRU_PREORDER_URL = TRU_BASE + "/zh-hk/whats-on/new-arrivals/pre-order/"
 TRU_STATE_FILE = Path("seen_toysrus.json")
 # 只想收陀螺相關 → 留住關鍵字；想收晒成個 pre-order → 設成空 tuple ()
-TRU_KEYWORDS = ("beyblade", "陀螺", "takara tomy", "bey", "ベイ")
+TRU_KEYWORDS = ("Beyblade", "beyblade", "陀螺", "Takara Tomy", "takara tomy", "bey", "ベイ")
 
 # ============ Logging ============
 logging.basicConfig(
