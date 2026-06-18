@@ -1,9 +1,13 @@
 name: Beyblade Stock Monitor
 
 on:
-  schedule:
-    - cron: '*/15 * * * *'
-  workflow_dispatch:        # 允許網頁／API 手動觸發
+  # ✅ 由 cron-jobs.org 經 GitHub API 觸發（必須要有 workflow_dispatch）
+  workflow_dispatch:
+
+  # 🔁 GitHub 內置排程（後備）。注意：cron-jobs.org + schedule 會「雙重觸發」
+  #     ＝用多一倍 Actions 分鐘。想用後備先 uncomment 下面兩行。
+  # schedule:
+  #   - cron: "*/15 * * * *"
 
 concurrency:
   group: stock-monitor
@@ -15,6 +19,7 @@ permissions:
 jobs:
   run-monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,20 +27,24 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 lxml      # ← 新增 bs4 / lxml
+          pip install requests beautifulsoup4 lxml
 
       - name: Run monitor script
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_IDS: ${{ secrets.TG_CHAT_IDS }}
+          PYTHONUNBUFFERED: "1"
+          # 👇 想一次過列晒所有貨嚟驗證：解除下面一行注釋
+          # TEST_MODE: "1"
+          # 👇 想 debug Toys'R'Us 結構：解除下面一行注釋
+          # DEBUG_TRU: "1"
         run: python Github_HBL_Toys_beyblade_telegram.py
 
-      # 🔴 把兩個 state 都 commit 返 repo
       - name: Persist state
         run: |
           git config user.name  "github-actions[bot]"
@@ -45,5 +54,9 @@ jobs:
             echo "state 冇變化,唔使 commit"
           else
             git commit -m "chore: update state [skip ci]"
-            git push
+            for i in 1 2 3; do
+              git pull --rebase --autostash && git push && break
+              echo "push 衝突,重試 $i ..."
+              sleep 5
+            done
           fi
