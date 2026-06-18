@@ -112,10 +112,7 @@ TRU_KEYWORDS = (
     "Beyblade",
     "beyblade",
     "陀螺",
-    "Takara Tomy",
-    "takara tomy",
     "bey",
-    "ベイ",
 )
 
 
