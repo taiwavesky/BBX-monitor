@@ -47,7 +47,7 @@ STATE_FILE = Path("seen_products.json")
 
 # ---- 來源 2：Toys"R"Us HK（Salesforce Commerce Cloud / SFRA）----
 TRU_BASE = "https://www.toysrus.com.hk"
-TRU_PREORDER_URL = TRU_BASE + "/en-hk/whats-on/new-arrivals/pre-order/"
+TRU_PREORDER_URL = TRU_BASE + "/zh-hk/whats-on/new-arrivals/pre-order/"
 TRU_STATE_FILE = Path("seen_toysrus.json")
 # 只想收陀螺相關 → 留住關鍵字；想收晒成個 pre-order → 設成空 tuple ()
 TRU_KEYWORDS = ("beyblade", "陀螺", "takara tomy", "bey", "ベイ")
@@ -76,7 +76,7 @@ TRU_HEADERS = {
     "User-Agent": HEADERS["User-Agent"],
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-HK,en;q=0.9,zh-HK;q=0.8,zh;q=0.7",
-    "Referer": TRU_BASE + "/en-hk/",
+    "Referer": TRU_BASE + "/zh-hk/",
 }
 
 
