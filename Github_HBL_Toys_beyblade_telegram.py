@@ -1,3 +1,21 @@
+"""
+Beyblade 預訂監察機（Hobbyland + Toys"R"Us HK）
+================================================
+功能：定時檢查兩個網站嘅 Beyblade / Takara Tomy 陀螺新貨／預訂，有新貨就 Telegram 通知。
+
+需要嘅環境變數（Environment Variables）：
+  TG_BOT_TOKEN  : Telegram bot token（必填）
+  TG_CHAT_IDS   : 收通知嘅 chat id，JSON 格式。可以係：
+                    - 陣列：[123456789, -1001234567890]
+                    - 物件：{"123456789": "我", "-1001234567890": "群組"}
+  TEST_MODE     : 設為 1/true → 即刻列晒兩邊現貨一次（用嚟測試）
+  DEBUG_TRU     : 設為 1      → 只抓 Toys"R"Us 並印出結構（用嚟 debug selector）
+
+執行環境：
+  - GitHub Actions：偵測到 GITHUB_ACTIONS=true → 行一次就 exit（由 cron-jobs.org 觸發）
+  - 本機：長駐 loop，每 CHECK_INTERVAL_MIN 分鐘檢查一次
+"""
+
 import atexit
 import json
 import logging
@@ -12,25 +30,65 @@ from urllib.parse import quote
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
 
-# ============ 共用設定 ============
+try:
+    from urllib3.util.retry import Retry
+except Exception:  # pragma: no cover
+    Retry = None
+
+
+# ============ Logging（一定要喺讀環境變數之前，等 log 即刻可用）============
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("monitor.log", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+log = logging.getLogger(__name__)
+
+
+# ============ 環境變數 / 共用設定 ============
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
 if not TG_BOT_TOKEN:
     raise SystemExit("❌ 未設定 TG_BOT_TOKEN（請喺 GitHub Secrets 或本機環境變數加入）")
 
-# Chat IDs 一律由環境變數讀，唔再 hardcode
-TG_CHAT_IDS = {}
-env_chat_ids = os.environ.get("TG_CHAT_IDS")
-if env_chat_ids:
-    try:
-        TG_CHAT_IDS = json.loads(env_chat_ids)
-    except Exception:
-        log.error("TG_CHAT_IDS 格式錯誤，應為合法 JSON")
-if not TG_CHAT_IDS:
-    raise SystemExit("❌ 未設定 TG_CHAT_IDS")
 
-# 🧪 測試開關：True = 即刻列晒兩邊現貨一次就停（本機用）
-TEST_MODE = False
+def _extract_chat_ids(raw):
+    """支援 list [id, id] 或 dict {id: label} / {label: id}，統一回傳 ['id', ...]。"""
+
+    def looks_like_id(v):
+        s = str(v).strip().lstrip("-")
+        return s.isdigit()
+
+    if isinstance(raw, list):
+        ids = raw
+    elif isinstance(raw, dict):
+        if raw and all(looks_like_id(k) for k in raw.keys()):
+            ids = list(raw.keys())
+        elif raw and all(looks_like_id(v) for v in raw.values()):
+            ids = list(raw.values())
+        else:
+            ids = list(raw.keys())
+    else:
+        ids = [raw]
+    return [str(x).strip() for x in ids if str(x).strip()]
+
+
+TG_CHAT_IDS = []
+_env_chat = os.environ.get("TG_CHAT_IDS")
+if _env_chat:
+    try:
+        TG_CHAT_IDS = _extract_chat_ids(json.loads(_env_chat))
+    except Exception as e:
+        log.error(f"TG_CHAT_IDS 格式錯誤，應為合法 JSON：{e}")
+if not TG_CHAT_IDS:
+    raise SystemExit("❌ 未設定 TG_CHAT_IDS（或格式錯誤）")
+
+# 🧪 測試開關：可用環境變數 TEST_MODE=1 開啟（會即刻列晒兩邊現貨一次）
+TEST_MODE = os.environ.get("TEST_MODE", "").lower() in ("1", "true", "yes")
 
 # 監察頻率（本機 loop 用；GitHub Actions 由 cron 控制，呢度唔生效）
 CHECK_INTERVAL_MIN = 5
@@ -43,28 +101,45 @@ TG_MSG_MAX = 4000
 # ---- 來源 1：Hobbyland ----
 API_URL = "https://backend.hobbylandeshop.com/api/products"
 SITE = "https://www.hobbylandeshop.com"
-STATE_FILE = Path("seen_products.json")
+STATE_FILE = Path("seen_hobbyland.json")
 
-# ---- 來源 2：Toys"R"Us HK（Salesforce Commerce Cloud / SFRA）----
+# ---- 來源 2：Toys"R"Us HK ----
 TRU_BASE = "https://www.toysrus.com.hk"
 TRU_PREORDER_URL = TRU_BASE + "/zh-hk/whats-on/new-arrivals/pre-order/"
 TRU_STATE_FILE = Path("seen_toysrus.json")
 # 只想收陀螺相關 → 留住關鍵字；想收晒成個 pre-order → 設成空 tuple ()
-TRU_KEYWORDS = ("Beyblade", "beyblade", "陀螺", "Takara Tomy", "takara tomy", "bey", "ベイ")
-
-# ============ Logging ============
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("monitor.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
+TRU_KEYWORDS = (
+    "Beyblade",
+    "beyblade",
+    "陀螺",
+    "Takara Tomy",
+    "takara tomy",
+    "bey",
+    "ベイ",
 )
-log = logging.getLogger(__name__)
 
-# 共用 session
+
+# ============ 共用 session（自動重試，淨係用喺「讀取」請求）============
 session = requests.Session()
+if Retry is not None:
+    try:
+        _retry = Retry(
+            total=3,
+            backoff_factor=1.0,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=frozenset(["GET", "POST"]),
+        )
+    except TypeError:  # 舊版 urllib3
+        _retry = Retry(
+            total=3,
+            backoff_factor=1.0,
+            status_forcelist=[429, 500, 502, 503, 504],
+            method_whitelist=frozenset(["GET", "POST"]),
+        )
+    _adapter = HTTPAdapter(max_retries=_retry)
+    session.mount("https://", _adapter)
+    session.mount("http://", _adapter)
+
 HEADERS = {
     "Content-Type": "application/json",
     "Origin": SITE,
@@ -78,6 +153,14 @@ TRU_HEADERS = {
     "Accept-Language": "zh-HK,zh;q=0.9,en-HK;q=0.8,en;q=0.7",
     "Referer": TRU_BASE + "/zh-hk/",
 }
+
+
+def _make_soup(html):
+    """優先用 lxml，冇裝就 fallback html.parser，兩者都解析得到。"""
+    try:
+        return BeautifulSoup(html, "lxml")
+    except Exception:
+        return BeautifulSoup(html, "html.parser")
 
 
 # ============ 狀態記憶（支援多個 state file）============
@@ -127,14 +210,29 @@ def send_telegram_chunks(blocks, header=""):
 
 
 def format_item(p, tag="🆕"):
-    limit = "無限制" if not p["sale_limit"] else f"{p['sale_limit']} 件"
-    return (
-        f"{tag} <b>{p['title']}</b>\n"
-        f"類型: {p['sell_type']}\n"
-        f"價錢: ${p['price']} (原價 ${p['regular_price']})\n"
-        f"庫存: {p['stock']} | 限購: {limit}\n"
-        f"{p['url']}"
-    )
+    lines = [f"{tag} <b>{p.get('title', '')}</b>"]
+
+    if p.get("sell_type"):
+        lines.append(f"類型: {p['sell_type']}")
+
+    price = str(p.get("price", "")).strip()
+    reg = str(p.get("regular_price", "")).strip()
+    if price and price != "?":
+        if reg and reg not in ("0", "") and reg != price:
+            lines.append(f"價錢: ${price} (原價 ${reg})")
+        else:
+            lines.append(f"價錢: ${price}")
+
+    stock = p.get("stock", "")
+    if stock not in ("", "-", None):
+        limit_raw = p.get("sale_limit", 0)
+        limit = "無限制" if not limit_raw else f"{limit_raw} 件"
+        lines.append(f"庫存: {stock} | 限購: {limit}")
+
+    if p.get("url"):
+        lines.append(p["url"])
+
+    return "\n".join(lines)
 
 
 # ============ 來源 1：Hobbyland 抓取 ============
@@ -173,41 +271,130 @@ def normalize(item):
     }
 
 
-# ============ 來源 2：Toys"R"Us 抓取（HTML scrape）============
+# ============ 來源 2：Toys"R"Us 抓取（HTML scrape，自動偵測）============
+def _clean_price(text):
+    if not text:
+        return ""
+    m = re.search(r"\d[\d,]*(?:\.\d+)?", str(text))
+    return m.group(0).replace(",", "") if m else ""
+
+
+def _tru_pick_link(tile):
+    """喺 tile 入面揀最似『產品頁』嘅 <a>。"""
+    anchors = tile.find_all("a", href=True)
+    if not anchors:
+        return None
+    for a in anchors:
+        href = a["href"].lower()
+        if ".html" in href or "/product" in href or "pid=" in href:
+            return a
+    return anchors[0]
+
+
+def _tru_extract_name(tile, link_el):
+    """試多個常見 selector，再 fallback 去 link 文字 / 屬性 / 圖片 alt。"""
+    name_selectors = [
+        ".pdp-link a",
+        ".product-name a",
+        "a.product-name",
+        ".product-name",
+        ".pdp-link",
+        "a.link",
+        ".tile-body a",
+        ".name a",
+        ".name",
+        ".product-tile__name",
+        ".product-title",
+        "[itemprop='name']",
+        ".card-title",
+        ".tile-title",
+        "h2 a",
+        "h3 a",
+        "h2",
+        "h3",
+    ]
+    for sel in name_selectors:
+        el = tile.select_one(sel)
+        if el:
+            txt = el.get_text(strip=True)
+            if txt:
+                return txt
+    if link_el is not None:
+        for attr in ("title", "aria-label", "data-name"):
+            v = link_el.get(attr)
+            if v and v.strip():
+                return v.strip()
+        txt = link_el.get_text(strip=True)
+        if txt:
+            return txt
+    img = tile.select_one("img[alt]")
+    if img and img.get("alt", "").strip():
+        return img["alt"].strip()
+    return ""
+
+
+def _tru_extract_price(tile):
+    price_selectors = [
+        ".price .sales .value",
+        ".price .value",
+        ".sales .value",
+        "[itemprop='price']",
+        ".price-sales",
+        ".product-price",
+        ".sales",
+        ".price",
+        "[class*='price']",
+    ]
+    for sel in price_selectors:
+        el = tile.select_one(sel)
+        if el is None:
+            continue
+        val = el.get("content") or el.get_text(" ", strip=True)
+        cleaned = _clean_price(val)
+        if cleaned:
+            return cleaned
+    return ""
+
+
 def _tru_parse_tiles(soup):
-    """由 HTML 抽出產品 tiles。SFRA 常見結構，如對唔到請睇下面 debug 段。"""
-    tiles = []
-    nodes = soup.select(
-        "div.product-tile, div.product[data-pid], li.product, div.tile"
-    )
+    """由 HTML 抽出產品 tiles（已對應 TRU HK 嘅實際結構）。"""
+    nodes = soup.select("div.product-tile")
+    if not nodes:
+        nodes = soup.select("div.product[data-pid], li.product, div.tile")
+    if not nodes:
+        # 最後手段：所有帶 data-pid 嘅「外層」元素
+        nodes = [
+            n
+            for n in soup.select("[data-pid]")
+            if not n.find_parent(attrs={"data-pid": True})
+        ]
+
+    out = []
+    seen_pids = set()
     for node in nodes:
         pid = node.get("data-pid")
         if not pid:
             inner = node.select_one("[data-pid]")
             pid = inner.get("data-pid") if inner else None
+        if pid:
+            if pid in seen_pids:
+                continue
+            seen_pids.add(pid)
 
-        name_el = node.select_one(
-            ".pdp-link a, .product-name a, a.link, .tile-body a, a.product-name"
-        )
-        title = name_el.get_text(strip=True) if name_el else ""
-        href = name_el.get("href", "") if name_el else ""
+        link_el = _tru_pick_link(node)
+        href = link_el["href"] if link_el is not None else ""
         url = href if href.startswith("http") else (TRU_BASE + href if href else "")
 
-        price_el = node.select_one(
-            ".price .sales .value, .price .value, .sales .value, .price"
-        )
-        price = ""
-        if price_el is not None:
-            price = price_el.get("content") or price_el.get_text(strip=True)
-            price = re.sub(r"[^\d.]", "", price)
+        title = _tru_extract_name(node, link_el)
+        price = _tru_extract_price(node)
 
         if not (title or pid):
             continue
 
-        sku = pid or (url or title)
-        tiles.append(
+        sku = pid or url or title
+        out.append(
             {
-                "title": title,
+                "title": title or "(未取得名稱)",
                 "sku": f"tru:{sku}",  # 加前綴，確保唔同 Hobbyland 撞 key
                 "price": price or "?",
                 "regular_price": "",
@@ -217,7 +404,7 @@ def _tru_parse_tiles(soup):
                 "sale_limit": 0,
             }
         )
-    return tiles
+    return out
 
 
 def fetch_toysrus_preorder():
@@ -225,13 +412,22 @@ def fetch_toysrus_preorder():
     seen_sku = set()
     items = []
     start = 0
+    page_size = 48
+    pages = 0
+
     while True:
-        params = {"start": start, "sz": 48}
-        resp = session.get(
-            TRU_PREORDER_URL, params=params, headers=TRU_HEADERS, timeout=20
-        )
-        resp.raise_for_status()
-        tiles = _tru_parse_tiles(BeautifulSoup(resp.text, "lxml"))
+        params = {} if start == 0 else {"start": start, "sz": page_size}
+        try:
+            resp = session.get(
+                TRU_PREORDER_URL, params=params, headers=TRU_HEADERS, timeout=20
+            )
+            resp.raise_for_status()
+        except requests.HTTPError:
+            if start == 0:
+                raise  # 第一頁都失敗 → 真係出事，往上拋
+            break  # 後續分頁失敗 → 當揭完
+
+        tiles = _tru_parse_tiles(_make_soup(resp.text))
         if not tiles:
             break
 
@@ -241,17 +437,27 @@ def fetch_toysrus_preorder():
                 seen_sku.add(t["sku"])
                 items.append(t)
                 new += 1
+        pages += 1
+
         if new == 0:  # 呢頁全部見過 → 到尾
             break
 
         start += len(tiles)
-        if start > 2000:  # 安全掣
+        if start > 3000:  # 安全掣
             break
         time.sleep(random.uniform(*PAGE_DELAY))
 
+    total = len(items)
     if TRU_KEYWORDS:
         kw = tuple(k.lower() for k in TRU_KEYWORDS)
-        items = [p for p in items if any(k in p["title"].lower() for k in kw)]
+        items = [
+            p
+            for p in items
+            if any(
+                k in (p.get("title", "") + " " + p.get("url", "")).lower() for k in kw
+            )
+        ]
+    log.info(f"[ToysRUs] 揭咗 {pages} 頁，共抓 {total} 件，符合關鍵字 {len(items)} 件")
     return items
 
 
@@ -375,7 +581,6 @@ def check_all_sources():
 # ============ 🧪 測試模式：兩邊都列一次 ============
 def run_test():
     log.info("🧪 測試模式：列出兩邊現貨")
-    # Hobbyland
     try:
         hb = [normalize(it) for it in fetch_all_products()]
         if hb:
@@ -388,7 +593,6 @@ def run_test():
     except Exception as e:
         log.exception(f"測試 Hobbyland 出事: {e}")
 
-    # Toys"R"Us
     try:
         tru = fetch_toysrus_preorder()
         if tru:
@@ -402,12 +606,37 @@ def run_test():
         log.exception(f"測試 ToysRUs 出事: {e}")
 
 
+# ============ 🔧 DEBUG_TRU：抓 TRU 並印結構（debug 用）============
+def debug_toysrus():
+    log.info("🔧 DEBUG_TRU：抓取 Toys'R'Us 並列印結構")
+    resp = session.get(TRU_PREORDER_URL, headers=TRU_HEADERS, timeout=20)
+    log.info(f"status={resp.status_code} len={len(resp.text)}")
+    soup = _make_soup(resp.text)
+    tiles = soup.select("div.product-tile")
+    log.info(f"div.product-tile 抓到 {len(tiles)} 個")
+    if tiles:
+        log.info("第一個 tile 結構（頭 2500 字）：\n" + tiles[0].prettify()[:2500])
+    parsed = _tru_parse_tiles(soup)
+    log.info(f"_tru_parse_tiles 解析到 {len(parsed)} 件，頭 5 件：")
+    for p in parsed[:5]:
+        log.info(json.dumps(p, ensure_ascii=False))
+
+
 # ============ 主程式 ============
 def main():
-    # 🌟 GitHub Actions：行一次兩個來源就 exit
+    # 🔧 Debug Toys"R"Us（最高優先）
+    if os.environ.get("DEBUG_TRU"):
+        debug_toysrus()
+        return
+
+    # 🌟 GitHub Actions：行一次就 exit
     if os.environ.get("GITHUB_ACTIONS") == "true":
-        log.info("🤖 偵測到 GitHub Actions，執行單次檢查...")
-        check_all_sources()
+        if TEST_MODE:
+            log.info("🤖 GitHub Actions（測試模式）：列出兩邊現貨...")
+            run_test()
+        else:
+            log.info("🤖 偵測到 GitHub Actions，執行單次檢查...")
+            check_all_sources()
         return
 
     # 本機測試模式
@@ -423,7 +652,9 @@ def main():
     # 本機長駐 loop
     log.info("陀螺監察機啟動 🌀")
     register_shutdown_hooks()
-    send_telegram("🤖 Beyblade X 陀螺預訂監察機已開機（Hobbyland + Toys'R'Us），有新貨即時通知!")
+    send_telegram(
+        "🤖 Beyblade X 陀螺預訂監察機已開機（Hobbyland + Toys'R'Us），有新貨即時通知!"
+    )
 
     while True:
         check_all_sources()
