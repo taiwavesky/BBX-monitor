@@ -93,7 +93,7 @@ TEST_MODE = os.environ.get("TEST_MODE", "").lower() in ("1", "true", "yes")
 # 監察頻率（本機 loop 用；GitHub Actions 由 cron 控制，呢度唔生效）
 CHECK_INTERVAL_MIN = 5
 JITTER_SEC = 90
-PAGE_DELAY = (0.5, 1.5)
+PAGE_DELAY = (0.5, 1)
 
 # Telegram 單一訊息字數上限約 4096，留啲緩衝
 TG_MSG_MAX = 4000
